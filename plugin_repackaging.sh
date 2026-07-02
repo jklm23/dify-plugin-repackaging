@@ -289,34 +289,48 @@ PY
 		inject_uv_into_pyproject "pyproject.toml"
 	fi
 
-	if [ -f "pyproject.toml" ] && [ ! -f "requirements.txt" ]; then
-		if command -v uv &> /dev/null; then
-			echo "Generating uv.lock file..."
-			uv lock ${UV_PLATFORM:+--python-platform ${UV_PLATFORM}} \
-				--python-version "${UV_PY_VERSION}" ${UV_PRERELEASE_FLAG}
-			if [[ $? -ne 0 ]]; then
-				echo "✗ Error: uv lock failed"
-				exit 1
-			fi
-			echo "✓ uv.lock generated successfully"
-
-			echo "Exporting requirements.txt from uv.lock..."
-			uv export --format requirements-txt -o requirements.txt \
-				${UV_PLATFORM:+--python-platform ${UV_PLATFORM}} \
-				--python-version "${UV_PY_VERSION}" ${UV_PRERELEASE_FLAG}
-			if [[ $? -ne 0 ]]; then
-				echo "✗ Error: uv export failed"
-				exit 1
-			fi
-			echo "✓ requirements.txt generated successfully"
-		else
-			echo "✗ Error: pyproject.toml found but uv is not installed"
-			echo "  Please install uv: pip install uv"
-			echo "  Or commit requirements.txt with the plugin"
-			exit 1
-		fi
+	if [ -f "pyproject.toml" ]; then
+	    if command -v uv &> /dev/null; then
+	        echo "Found pyproject.toml, regenerating requirements.txt with uv..."
+	
+	        # 不信任插件包自带的 requirements.txt / uv.lock，重新解析公开 PyPI 可用版本
+	        rm -f requirements.txt
+	        rm -f uv.lock
+	
+	        echo "Generating fresh uv.lock file..."
+	        uv lock ${UV_PLATFORM:+--python-platform ${UV_PLATFORM}} \
+	            --python-version "${UV_PY_VERSION}" \
+	            ${UV_PRERELEASE_FLAG}
+	
+	        if [[ $? -ne 0 ]]; then
+	            echo "✗ Error: uv lock failed"
+	            exit 1
+	        fi
+	
+	        echo "Exporting fresh requirements.txt from uv.lock..."
+	        uv export --format requirements-txt \
+	            --no-hashes \
+	            -o requirements.txt \
+	            ${UV_PLATFORM:+--python-platform ${UV_PLATFORM}} \
+	            --python-version "${UV_PY_VERSION}" \
+	            ${UV_PRERELEASE_FLAG}
+	
+	        if [[ $? -ne 0 ]]; then
+	            echo "✗ Error: uv export failed"
+	            exit 1
+	        fi
+	
+	        echo "✓ requirements.txt regenerated successfully"
+	    else
+	        echo "✗ Error: pyproject.toml found but uv is not installed"
+	        echo "  Please install uv: pip install uv"
+	        exit 1
+	    fi
 	elif [ -f "requirements.txt" ]; then
-		echo "✓ Using existing requirements.txt"
+	    echo "✓ Using existing requirements.txt"
+	else
+	    echo "✗ Error: requirements.txt not found"
+	    exit 1
 	fi
 
 	[ ! -f "requirements.txt" ] && echo "✗ Error: requirements.txt not found" && exit 1
