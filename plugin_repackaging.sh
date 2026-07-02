@@ -146,87 +146,160 @@ install_unzip() {
     fi
 }
 
-inject_uv_into_pyproject() {
-    local PYFILE="$1"
-
-    if [ ! -f "$PYFILE" ]; then
+strip_dev_dependencies_from_pyproject() {
+    if [ ! -f "pyproject.toml" ]; then
         return 0
     fi
 
-    awk '
-        BEGIN {
-            in_uv=0
-            saw_uv=0
-            saw_no=0
-            saw_find=0
-            saw_pre=0
-        }
+    echo ""
+    echo "Removing dev/test dependency groups from pyproject.toml..."
 
-        function print_missing() {
-            if (!saw_no) print "no-index = true"
-            if (!saw_find) print "find-links = [\"./wheels\"]"
-            if (!saw_pre) print "prerelease = \"allow\""
-        }
+    python3 - <<'PY'
+from pathlib import Path
 
-        /^[ \t]*\[tool\.uv\][ \t]*$/ {
-            saw_uv=1
-            in_uv=1
-            saw_no=0
-            saw_find=0
-            saw_pre=0
-            print
-            next
-        }
+p = Path("pyproject.toml")
+lines = p.read_text(encoding="utf-8").splitlines()
 
-        {
-            if (in_uv && $0 ~ /^[ \t]*\[/) {
-                print_missing()
-                in_uv=0
-            }
-        }
+out = []
+skip_table = False
+skip_multiline_optional = False
 
-        {
-            if (in_uv && $0 ~ /^[ \t]*no-index[ \t]*=/) {
-                print "no-index = true"
-                saw_no=1
-                next
-            }
-        }
+dev_keys = {
+    "dev",
+    "test",
+    "tests",
+    "pytest",
+    "lint",
+    "format",
+    "typing",
+    "docs",
+}
 
-        {
-            if (in_uv && $0 ~ /^[ \t]*find-links[ \t]*=/) {
-                print "find-links = [\"./wheels\"]"
-                saw_find=1
-                next
-            }
-        }
+remove_exact_tables = {
+    "dependency-groups",
+    "tool.uv.dependency-groups",
+}
 
-        {
-            if (in_uv && $0 ~ /^[ \t]*prerelease[ \t]*=/) {
-                print "prerelease = \"allow\""
-                saw_pre=1
-                next
-            }
-        }
+remove_table_prefixes = (
+    "dependency-groups.",
+    "tool.uv.dependency-groups.",
+)
 
-        { print }
+def table_name(line: str):
+    s = line.strip()
+    if s.startswith("[") and s.endswith("]"):
+        return s.strip("[]").strip()
+    return None
 
-        END {
-            if (in_uv) {
-                print_missing()
-            }
+def starts_dev_key(line: str):
+    s = line.strip()
+    if "=" not in s:
+        return False
+    key = s.split("=", 1)[0].strip().strip('"').strip("'")
+    return key in dev_keys
 
-            if (!saw_uv) {
-                print ""
-                print "[tool.uv]"
-                print "no-index = true"
-                print "find-links = [\"./wheels\"]"
-                print "prerelease = \"allow\""
-            }
-        }
-    ' "$PYFILE" > "$PYFILE.tmp" && mv "$PYFILE.tmp" "$PYFILE"
+for line in lines:
+    t = table_name(line)
 
-    echo "✓ Injected offline [tool.uv] into $PYFILE"
+    if t is not None:
+        skip_multiline_optional = False
+
+        if t in remove_exact_tables or t.startswith(remove_table_prefixes):
+            skip_table = True
+            continue
+
+        skip_table = False
+        out.append(line)
+        continue
+
+    if skip_table:
+        continue
+
+    if skip_multiline_optional:
+        if "]" in line:
+            skip_multiline_optional = False
+        continue
+
+    # Remove dev/test entries inside [project.optional-dependencies]
+    # Supports:
+    #   dev = [...]
+    #   test = [
+    #       ...
+    #   ]
+    if starts_dev_key(line):
+        if "[" in line and "]" not in line:
+            skip_multiline_optional = True
+        continue
+
+    out.append(line)
+
+p.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+
+    echo "✓ Removed dev/test dependency groups from pyproject.toml"
+
+    echo "Remaining dev/test references:"
+    grep -nE "pytest|dependency-groups|optional-dependencies|dev =" pyproject.toml || true
+}
+
+inject_uv_offline_config() {
+    if [ ! -f "pyproject.toml" ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "Injecting offline uv configuration into pyproject.toml..."
+
+    python3 - <<'PY'
+from pathlib import Path
+
+p = Path("pyproject.toml")
+lines = p.read_text(encoding="utf-8").splitlines()
+
+out = []
+skip = False
+
+remove_tables = {
+    "tool.uv",
+    "tool.uv.pip",
+}
+
+for line in lines:
+    stripped = line.strip()
+
+    if stripped.startswith("[") and stripped.endswith("]"):
+        table = stripped.strip("[]").strip()
+
+        if table in remove_tables:
+            skip = True
+            continue
+
+        skip = False
+        out.append(line)
+        continue
+
+    if skip:
+        continue
+
+    out.append(line)
+
+append = """
+[tool.uv]
+no-index = true
+find-links = ["./wheels"]
+prerelease = "allow"
+
+[tool.uv.pip]
+no-index = true
+find-links = ["./wheels"]
+"""
+
+content = "\n".join(out).rstrip() + "\n\n" + append.strip() + "\n"
+p.write_text(content, encoding="utf-8")
+PY
+
+    echo "✓ Injected [tool.uv] and [tool.uv.pip] offline configuration"
+    grep -nE "tool.uv|no-index|find-links|prerelease" pyproject.toml || true
 }
 
 patch_requirements_for_arm64() {
@@ -251,9 +324,9 @@ for line in text.splitlines():
     stripped = line.strip()
 
     # Replace all exact pinned jiter versions:
-    # jiter==0.15.0
-    # jiter==0.16.0
-    # jiter==0.x.x ; marker
+    #   jiter==0.15.0
+    #   jiter==0.16.0
+    #   jiter==0.x.x ; marker
     if stripped.startswith("jiter=="):
         prefix_spaces = line[:len(line) - len(line.lstrip())]
         new_lines.append(prefix_spaces + "jiter==0.14.0")
@@ -337,6 +410,8 @@ repackage() {
     if [ ! -f "pyproject.toml" ] && [ ! -f "requirements.txt" ]; then
         echo "⚠ Warning: No pyproject.toml or requirements.txt found"
     fi
+
+    strip_dev_dependencies_from_pyproject
 
     if python3 -m pip --version &> /dev/null 2>&1; then
         PIP_CMD="python3 -m pip"
@@ -429,6 +504,7 @@ PY
             echo "Exporting fresh requirements.txt from uv.lock..."
             uv export --format requirements-txt \
                 --no-hashes \
+                --no-dev \
                 -o requirements.txt \
                 ${UV_PRERELEASE_FLAG}
 
@@ -493,16 +569,12 @@ PY
     WHEEL_COUNT=$(ls -1 ./wheels/*.whl 2>/dev/null | wc -l)
     echo "✓ Downloaded ${WHEEL_COUNT} wheel packages"
 
-    if [ -f "pyproject.toml" ]; then
-        echo ""
-        echo "Injecting offline [tool.uv] configuration after wheel download..."
-        inject_uv_into_pyproject "pyproject.toml"
-    fi
+    echo ""
+    echo "Injecting offline configuration after wheel download..."
+    inject_uv_offline_config
 
-    # Very important:
-    # Remove uv.lock before packaging.
-    # If uv.lock is kept, plugin_daemon may follow remote wheel URLs recorded in uv.lock
-    # and try to access files.pythonhosted.org in an offline intranet.
+    echo ""
+    echo "Removing uv.lock before packaging..."
     rm -f uv.lock
     echo "✓ Removed uv.lock to force offline resolution from ./wheels"
 
@@ -559,7 +631,7 @@ print_usage() {
     echo "    Python packages platform for cross repacking."
     echo "    Example:"
     echo "      -p manylinux_2_28_aarch64"
-    echo "      -p \"manylinux_2_28_aarch64 --platform manylinux_2_17_aarch64\""
+    echo "      -p \"manylinux_2_28_aarch64 --platform manylinux_2_17_aarch64 --platform manylinux2014_aarch64\""
     echo ""
     echo "-s package_suffix:"
     echo "    Output package suffix."
@@ -582,16 +654,9 @@ while getopts "p:s:R" opt; do
         p)
             RAW_PLATFORM="${OPTARG}"
 
-            # If user only provides one ARM64 platform, automatically add compatible ARM64 manylinux tags.
-            # Example:
-            #   -p manylinux_2_28_aarch64
-            # will become:
-            #   --platform manylinux_2_28_aarch64
-            #   --platform manylinux_2_17_aarch64
-            #   --platform manylinux2014_aarch64
-            #
-            # If user already provides multiple --platform args, keep them as-is.
-            if [[ "${OPTARG}" == *"aarch64"* && "${OPTARG}" != *"--platform"* ]]; then
+            if [[ "${OPTARG}" == --platform* ]]; then
+                PIP_PLATFORM="${OPTARG} --only-binary=:all:"
+            elif [[ "${OPTARG}" == *"aarch64"* && "${OPTARG}" != *"--platform"* ]]; then
                 PIP_PLATFORM="--platform ${OPTARG} --platform manylinux_2_17_aarch64 --platform manylinux2014_aarch64 --only-binary=:all:"
             else
                 PIP_PLATFORM="--platform ${OPTARG} --only-binary=:all:"
