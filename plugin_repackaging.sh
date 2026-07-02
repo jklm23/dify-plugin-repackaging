@@ -232,14 +232,18 @@ patch_requirements_for_arm64() {
 
     echo "Applying ARM64 dependency compatibility patches..."
 
-    # jiter==0.15.0 may not have compatible public ARM64 wheels in some indexes.
-    # Replace only when the line starts with jiter==0.15.0.
+    # jiter newer versions may not provide compatible public ARM64 wheels
+    # for pip download --platform manylinux_*_aarch64 --only-binary.
+    # Force a known available cp312 manylinux_2_17_aarch64 wheel version.
     awk '
-        /^jiter==0\.15\.0([[:space:]]|;|$)/ {
-            sub(/^jiter==0\.15\.0/, "jiter==0.14.0")
+        /^jiter==[0-9]+\.[0-9]+\.[0-9]+([[:space:]]|;|$)/ {
+            sub(/^jiter==[0-9]+\.[0-9]+\.[0-9]+/, "jiter==0.14.0")
         }
         { print }
     ' requirements.txt > requirements.txt.tmp && mv requirements.txt.tmp requirements.txt
+
+    echo "jiter lines after patch:"
+    grep -n '^jiter==' requirements.txt || true
 
     echo "✓ Dependency patches applied"
 }
