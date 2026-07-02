@@ -499,6 +499,13 @@ PY
         inject_uv_into_pyproject "pyproject.toml"
     fi
 
+    # Very important:
+    # Remove uv.lock before packaging.
+    # If uv.lock is kept, plugin_daemon may follow remote wheel URLs recorded in uv.lock
+    # and try to access files.pythonhosted.org in an offline intranet.
+    rm -f uv.lock
+    echo "✓ Removed uv.lock to force offline resolution from ./wheels"
+
     echo ""
     echo "=========================================="
     echo "Step 4: Updating offline install config"
