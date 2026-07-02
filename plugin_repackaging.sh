@@ -1,8 +1,8 @@
 #!/bin/bash
 # author: Junjie.M
-# modified for ARM64 offline packaging
+# modified for Dify ARM64 offline plugin repackaging
 
-set -e
+set -o pipefail
 
 DEFAULT_GITHUB_API_URL=https://github.com
 DEFAULT_MARKETPLACE_API_URL=https://marketplace.dify.ai
@@ -25,7 +25,6 @@ if [[ "$ARCH_NAME" == "arm64" || "$ARCH_NAME" == "aarch64" ]]; then
     CMD_NAME="dify-plugin-${OS_TYPE}-arm64"
 fi
 
-# Cross packaging / resolution controls
 PIP_PLATFORM=""
 RAW_PLATFORM=""
 PACKAGE_SUFFIX="offline"
@@ -36,7 +35,7 @@ market() {
         echo ""
         echo "Usage: $0 market [plugin author] [plugin name] [plugin version]"
         echo "Example:"
-        echo "  $0 market langgenius agent 0.0.9"
+        echo "  $0 market langgenius openai_api_compatible 0.0.53"
         echo ""
         exit 1
     fi
@@ -127,27 +126,32 @@ _local() {
 }
 
 install_unzip() {
-    if ! command -v unzip &> /dev/null; then
-        echo "Installing unzip ..."
+    if command -v unzip &> /dev/null; then
+        return 0
+    fi
 
-        if command -v apt-get &> /dev/null; then
-            sudo apt-get update
-            sudo apt-get install -y unzip
-        elif command -v dnf &> /dev/null; then
-            sudo dnf install -y unzip
-        elif command -v yum &> /dev/null; then
-            sudo yum install -y unzip
-        else
-            echo "✗ Error: unzip not found and no supported package manager detected."
-            echo "  Please install unzip manually."
-            exit 1
-        fi
+    echo "Installing unzip ..."
+
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update
+        sudo apt-get install -y unzip
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y unzip
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y unzip
+    else
+        echo "✗ Error: unzip not found and no supported package manager detected."
+        echo "  Please install unzip manually."
+        exit 1
     fi
 }
 
 inject_uv_into_pyproject() {
     local PYFILE="$1"
-    [ -f "$PYFILE" ] || return 0
+
+    if [ ! -f "$PYFILE" ]; then
+        return 0
+    fi
 
     awk '
         BEGIN {
@@ -230,20 +234,37 @@ patch_requirements_for_arm64() {
         return 0
     fi
 
+    echo ""
     echo "Applying ARM64 dependency compatibility patches..."
 
-    # jiter newer versions may not provide compatible public ARM64 wheels
-    # for pip download --platform manylinux_*_aarch64 --only-binary.
-    # Force a known available cp312 manylinux_2_17_aarch64 wheel version.
-    awk '
-        /^jiter==[0-9]+\.[0-9]+\.[0-9]+([[:space:]]|;|$)/ {
-            sub(/^jiter==[0-9]+\.[0-9]+\.[0-9]+/, "jiter==0.14.0")
-        }
-        { print }
-    ' requirements.txt > requirements.txt.tmp && mv requirements.txt.tmp requirements.txt
+    echo "Before jiter patch:"
+    grep -n "jiter" requirements.txt || true
 
-    echo "jiter lines after patch:"
-    grep -n '^jiter==' requirements.txt || true
+    python3 - <<'PY'
+from pathlib import Path
+
+p = Path("requirements.txt")
+text = p.read_text(encoding="utf-8")
+
+new_lines = []
+for line in text.splitlines():
+    stripped = line.strip()
+
+    # Replace all exact pinned jiter versions:
+    # jiter==0.15.0
+    # jiter==0.16.0
+    # jiter==0.x.x ; marker
+    if stripped.startswith("jiter=="):
+        prefix_spaces = line[:len(line) - len(line.lstrip())]
+        new_lines.append(prefix_spaces + "jiter==0.14.0")
+    else:
+        new_lines.append(line)
+
+p.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+PY
+
+    echo "After jiter patch:"
+    grep -n "jiter" requirements.txt || true
 
     echo "✓ Dependency patches applied"
 }
@@ -256,7 +277,6 @@ update_requirements_for_offline() {
     echo ""
     echo "Updating requirements.txt for offline installation..."
 
-    # Avoid duplicate no-index line.
     if ! grep -q '^--no-index --find-links=./wheels/$' requirements.txt; then
         if [[ "$OS_TYPE" == "darwin" ]]; then
             sed -i ".bak" '1i\
@@ -267,7 +287,6 @@ update_requirements_for_offline() {
         fi
     fi
 
-    # Make sure wheels are not ignored during packaging.
     if [ -f ".difyignore" ]; then
         IGNORE_PATH=".difyignore"
     elif [ -f ".gitignore" ]; then
@@ -304,8 +323,8 @@ repackage() {
     install_unzip
 
     rm -rf "${CURR_DIR:?}/${PACKAGE_NAME}"
-    unzip -o "${PACKAGE_PATH}" -d "${CURR_DIR}/${PACKAGE_NAME}"
 
+    unzip -o "${PACKAGE_PATH}" -d "${CURR_DIR}/${PACKAGE_NAME}"
     if [[ $? -ne 0 ]]; then
         echo "✗ Error: Failed to extract package"
         exit 1
@@ -332,9 +351,6 @@ repackage() {
 
     echo "✓ Using pip: ${PIP_CMD}"
 
-    # ============================================
-    # Step 1: Detect Python and platform configuration
-    # ============================================
     echo ""
     echo "=========================================="
     echo "Step 1: Detecting Python and platform"
@@ -354,11 +370,11 @@ repackage() {
         if command -v python3.12 &> /dev/null; then
             PYTHON_CMD_FOR_UV="python3.12"
             PYTHON_VERSION=$($PYTHON_CMD_FOR_UV --version 2>&1 | awk '{print $2}')
-            echo "✓ Switched to python3.12 ($PYTHON_VERSION) for better compatibility"
+            echo "✓ Switched to python3.12 ($PYTHON_VERSION)"
         elif command -v python3.13 &> /dev/null; then
             PYTHON_CMD_FOR_UV="python3.13"
             PYTHON_VERSION=$($PYTHON_CMD_FOR_UV --version 2>&1 | awk '{print $2}')
-            echo "✓ Switched to python3.13 ($PYTHON_VERSION) for better compatibility"
+            echo "✓ Switched to python3.13 ($PYTHON_VERSION)"
         else
             echo "⚠ Warning: No compatible Python version found, proceeding with $PYTHON_VERSION"
         fi
@@ -373,22 +389,9 @@ PY
 )
 
     if [[ -n "$RAW_PLATFORM" ]]; then
-        case "$RAW_PLATFORM" in
-            *linux*|*manylinux* )
-                echo "Target platform: Linux cross packaging from ${OS_TYPE}"
-                ;;
-            *macos*|*darwin* )
-                echo "Target platform: macOS cross packaging from ${OS_TYPE}"
-                ;;
-            *win* )
-                echo "Target platform: Windows cross packaging from ${OS_TYPE}"
-                ;;
-            * )
-                echo "Target platform: current system ${OS_TYPE}"
-                ;;
-        esac
+        echo "Target platform args: ${RAW_PLATFORM}"
     else
-        echo "Target platform: current system ${OS_TYPE}"
+        echo "Target platform args: current platform"
     fi
 
     UV_PRERELEASE_FLAG=""
@@ -401,9 +404,6 @@ PY
 
     echo "✓ Configuration: python=$UV_PY_VERSION, raw_platform=${RAW_PLATFORM:-current}"
 
-    # ============================================
-    # Step 2: Generate requirements.txt
-    # ============================================
     echo ""
     echo "=========================================="
     echo "Step 2: Processing dependencies"
@@ -413,8 +413,6 @@ PY
         if command -v uv &> /dev/null; then
             echo "Found pyproject.toml, regenerating requirements.txt with uv..."
 
-            # Do not trust bundled requirements.txt / uv.lock.
-            # Generate a fresh requirements.txt from pyproject.toml.
             rm -f requirements.txt
             rm -f uv.lock
 
@@ -459,9 +457,6 @@ PY
 
     patch_requirements_for_arm64
 
-    # ============================================
-    # Step 3: Download Python dependencies as wheels
-    # ============================================
     echo ""
     echo "=========================================="
     echo "Step 3: Downloading dependencies"
@@ -476,6 +471,10 @@ PY
 
     mkdir -p ./wheels
     echo "Downloading wheels to ./wheels/..."
+
+    echo ""
+    echo "Final jiter line before pip download:"
+    grep -n "jiter" requirements.txt || true
 
     ${PIP_CMD} download ${PIP_PLATFORM} \
         --prefer-binary \
@@ -494,18 +493,12 @@ PY
     WHEEL_COUNT=$(ls -1 ./wheels/*.whl 2>/dev/null | wc -l)
     echo "✓ Downloaded ${WHEEL_COUNT} wheel packages"
 
-    # IMPORTANT:
-    # Inject offline uv config only after wheels have been downloaded.
-    # Otherwise uv lock will try to resolve from ./wheels before wheels exist.
     if [ -f "pyproject.toml" ]; then
         echo ""
         echo "Injecting offline [tool.uv] configuration after wheel download..."
         inject_uv_into_pyproject "pyproject.toml"
     fi
 
-    # ============================================
-    # Step 4: Update requirements.txt for offline usage
-    # ============================================
     echo ""
     echo "=========================================="
     echo "Step 4: Updating offline install config"
@@ -513,9 +506,6 @@ PY
 
     update_requirements_for_offline
 
-    # ============================================
-    # Step 5: Package the plugin
-    # ============================================
     echo ""
     echo "=========================================="
     echo "Step 5: Packaging plugin"
