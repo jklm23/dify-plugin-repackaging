@@ -574,7 +574,21 @@ while getopts "p:s:R" opt; do
     case "$opt" in
         p)
             RAW_PLATFORM="${OPTARG}"
-            PIP_PLATFORM="--platform ${OPTARG} --only-binary=:all:"
+
+            # If user only provides one ARM64 platform, automatically add compatible ARM64 manylinux tags.
+            # Example:
+            #   -p manylinux_2_28_aarch64
+            # will become:
+            #   --platform manylinux_2_28_aarch64
+            #   --platform manylinux_2_17_aarch64
+            #   --platform manylinux2014_aarch64
+            #
+            # If user already provides multiple --platform args, keep them as-is.
+            if [[ "${OPTARG}" == *"aarch64"* && "${OPTARG}" != *"--platform"* ]]; then
+                PIP_PLATFORM="--platform ${OPTARG} --platform manylinux_2_17_aarch64 --platform manylinux2014_aarch64 --only-binary=:all:"
+            else
+                PIP_PLATFORM="--platform ${OPTARG} --only-binary=:all:"
+            fi
             ;;
         s)
             PACKAGE_SUFFIX="${OPTARG}"
