@@ -285,9 +285,21 @@ for line in lines:
 
 append = """
 [tool.uv]
+# Offline installation: do not use external package indexes.
 no-index = true
 find-links = ["./wheels"]
 prerelease = "allow"
+
+# Important for ARM64 offline packages:
+# Limit uv resolution to Linux ARM64 only.
+# Otherwise uv may try to resolve Windows/macOS conditional dependencies,
+# such as gevent -> cffi on win32, and fail because only Linux ARM64 wheels exist.
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
 
 [tool.uv.pip]
 no-index = true
@@ -298,8 +310,8 @@ content = "\n".join(out).rstrip() + "\n\n" + append.strip() + "\n"
 p.write_text(content, encoding="utf-8")
 PY
 
-    echo "✓ Injected [tool.uv] and [tool.uv.pip] offline configuration"
-    grep -nE "tool.uv|no-index|find-links|prerelease" pyproject.toml || true
+    echo "✓ Injected [tool.uv] and [tool.uv.pip] offline ARM64 configuration"
+    grep -nE "tool.uv|no-index|find-links|prerelease|environments|required-environments|platform_machine|sys_platform" pyproject.toml || true
 }
 
 patch_requirements_for_arm64() {
